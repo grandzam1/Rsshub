@@ -1,0 +1,75 @@
+name: rsshub-docker-staging
+
+services:
+    rsshub:
+        image: '${RSSHUB_IMAGE:?Set RSSHUB_IMAGE to a commit-tagged local image}'
+        restart: unless-stopped
+        cpus: 0.75
+        mem_limit: 768m
+        memswap_limit: 768m
+        pids_limit: 128
+        command: ['node', '--max-old-space-size=512', '--max-http-header-size=32768', 'dist/index.mjs']
+        env_file:
+            - path: '${RSSHUB_ENV_FILE:-/etc/rsshub-docker/rsshub.env}'
+              format: raw
+        environment:
+            NODE_ENV: production
+            PORT: '1200'
+            LISTEN_INADDR_ANY: '1'
+            CACHE_TYPE: redis
+            REDIS_URL: 'redis://redis:6379/'
+            NODE_OPTIONS: '--max-http-header-size=32768'
+        ports:
+            - '127.0.0.1:11200:1200'
+        labels:
+            traefik.enable: 'false'
+        depends_on:
+            redis:
+                condition: service_healthy
+        healthcheck:
+            test:
+                - CMD
+                - node
+                - -e
+                - >-
+                    const http = require('node:http');
+                    const url = new URL('http://127.0.0.1:1200/healthz');
+                    if (process.env.ACCESS_KEY) url.searchParams.set('key', process.env.ACCESS_KEY);
+                    const req = http.get(url, (res) => { res.resume(); process.exit(res.statusCode === 200 ? 0 : 1); });
+                    req.setTimeout(5000, () => { req.destroy(); process.exit(1); });
+                    req.on('error', () => process.exit(1));
+            interval: 15s
+            timeout: 10s
+            retries: 6
+            start_period: 30s
+        logging:
+            driver: json-file
+            options:
+                max-size: 10m
+                max-file: '3'
+
+    redis:
+        image: '${REDIS_IMAGE:-redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe}'
+        restart: unless-stopped
+        cpus: 0.25
+        mem_limit: 256m
+        memswap_limit: 256m
+        pids_limit: 64
+        command: ['redis-server', '--maxmemory', '64mb', '--maxmemory-policy', 'allkeys-lru', '--appendonly', 'yes', '--appendfsync', 'everysec']
+        labels:
+            traefik.enable: 'false'
+        volumes:
+            - redis-data:/data
+        healthcheck:
+            test: ['CMD', 'redis-cli', 'ping']
+            interval: 10s
+            timeout: 5s
+            retries: 6
+        logging:
+            driver: json-file
+            options:
+                max-size: 10m
+                max-file: '3'
+
+volumes:
+    redis-data:

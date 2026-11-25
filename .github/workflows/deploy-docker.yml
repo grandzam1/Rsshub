@@ -1,0 +1,88 @@
+name: Deploy Docker staging
+
+on:
+    workflow_dispatch:
+        inputs:
+            deploy_staging:
+                description: 'Build and deploy only the isolated RSSHub/Redis Docker staging stack'
+                type: boolean
+                required: true
+                default: false
+
+permissions:
+    contents: read
+
+concurrency:
+    group: rsshub-vps-operations
+    cancel-in-progress: false
+
+jobs:
+    deploy:
+        if: ${{ inputs.deploy_staging && github.repository == 'grandzam1/Rsshub' && github.ref == 'refs/heads/main' }}
+        runs-on: ubuntu-latest
+        environment: rsshub-docker-staging
+        timeout-minutes: 60
+        steps:
+            - name: Check out the selected source commit
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+              with:
+                  ref: ${{ github.sha }}
+                  persist-credentials: false
+
+            - name: Set up a resource-limited builder on the GitHub runner
+              uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003
+              with:
+                  driver: docker-container
+                  driver-opts: |
+                      memory=3g
+                      memory-swap=3g
+                      cpu-period=100000
+                      cpu-quota=150000
+                  buildkitd-config-inline: |
+                      [worker.oci]
+                        max-parallelism = 2
+
+            - name: Build the image without runtime credentials
+              env:
+                  DEPLOY_SHA: ${{ github.sha }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  [[ $DEPLOY_SHA =~ ^[0-9a-f]{40}$ ]]
+                  docker buildx build --load --platform linux/amd64 \
+                      --build-arg PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+                      --label "org.opencontainers.image.revision=$DEPLOY_SHA" \
+                      --tag "rsshub-vps:$DEPLOY_SHA" .
+                  size=$(docker image inspect "rsshub-vps:$DEPLOY_SHA" --format '{{.Size}}')
+                  [[ $size -le 2147483648 ]] || { printf 'Image exceeds the 2 GiB staging size limit.\n' >&2; exit 1; }
+
+            - name: Stream the image to the staging deployment helper over verified SSH
+              env:
+                  DEPLOY_SHA: ${{ github.sha }}
+                  VPS_HOST: ${{ secrets.VPS_HOST }}
+                  VPS_USER: ${{ secrets.VPS_USER }}
+                  VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+                  VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  umask 077
+                  : "${VPS_HOST:?Configure VPS_HOST}"
+                  : "${VPS_USER:?Configure VPS_USER}"
+                  : "${VPS_SSH_KEY:?Configure VPS_SSH_KEY}"
+                  : "${VPS_KNOWN_HOSTS:?Configure VPS_KNOWN_HOSTS}"
+                  [[ $DEPLOY_SHA =~ ^[0-9a-f]{40}$ ]]
+                  [[ $VPS_HOST =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]]
+                  [[ $VPS_USER =~ ^[a-z_][a-z0-9_-]*$ ]]
+                  ssh_dir=$(mktemp -d)
+                  trap 'rm -rf -- "$ssh_dir"' EXIT
+                  printf '%s\n' "$VPS_SSH_KEY" > "$ssh_dir/deploy_key"
+                  printf '%s\n' "$VPS_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+                  docker image save "rsshub-vps:$DEPLOY_SHA" | gzip -1 | \
+                      ssh -F /dev/null -i "$ssh_dir/deploy_key" \
+                          -o BatchMode=yes -o IdentitiesOnly=yes \
+                          -o StrictHostKeyChecking=yes \
+                          -o "UserKnownHostsFile=$ssh_dir/known_hosts" \
+                          -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
+                          "$VPS_USER@$VPS_HOST" \
+                          "sudo -n /usr/local/bin/rsshub-docker-deploy.sh --deploy-staging $DEPLOY_SHA"
