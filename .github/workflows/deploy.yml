@@ -19,4 +19,4 @@ jobs:
                   echo "$VPS_SSH_KEY" > ~/.ssh/deploy_key
                   chmod 600 ~/.ssh/deploy_key
                   echo "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
-                  ssh -i ~/.ssh/deploy_key $VPS_USER@$VPS_HOST
+                  ssh -i ~/.ssh/deploy_key $VPS_USER@$VPS_HOST sudo -n /usr/local/bin/rsshub-deploy.sh
